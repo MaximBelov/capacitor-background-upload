@@ -3,8 +3,8 @@
   "appName": "example-app",
   "webDir": "dist",
   "plugins": {
-    "SplashScreen": {
-      "launchAutoHide": false
+    "CapacitorHttp": {
+      "enabled": false
     }
   }
 }
