@@ -11,6 +11,12 @@ const PROGRESS_INTERVAL_MS = 1000;
 /** The error codes a `FAILED` event carries, the same as on iOS and Android. */
 const HTTP_STATUS = 0;
 const ATTEMPTS_EXHAUSTED = -2;
+/**
+ * How long a network error that follows a "Leave site?" prompt is held before it is reported. WebKit ends the requests
+ * as soon as the user answers "Leave", before `pagehide`; if the page is then gone the held error goes with it, and if
+ * the user stayed (or the next page is slow to arrive) it is reported once this has passed.
+ */
+const LEAVE_GRACE_MS = 10_000;
 
 interface Running {
   xhr: XMLHttpRequest;
@@ -67,9 +73,34 @@ export class BackgroundUploadWeb extends WebPlugin implements BackgroundUploadPl
   private readonly running = new Map<string, Running>();
   /** Starts still fetching their file, by id; a later start or a removeUpload replaces or drops the entry. */
   private readonly starting = new Map<string, object>();
+  /** Set once the page is being left; a request the browser ends because of that is not a failure. */
+  private leaving = false;
+  /** When the page last asked "Leave site?"; 0 when it has not. */
+  private askedToLeaveAt = 0;
+
+  /**
+   * While anything is uploading, leaving the page (a reload, closing the tab, following a link) first asks the user,
+   * because leaving ends every request. Browsers show their own text; a page cannot set it.
+   */
+  private readonly confirmLeave = (event: BeforeUnloadEvent): void => {
+    if (this.running.size === 0 && this.starting.size === 0) return;
+    event.preventDefault();
+    // Older engines ask only when returnValue is set.
+    event.returnValue = '';
+    this.askedToLeaveAt = Date.now();
+  };
+  private readonly onPageHide = (): void => {
+    this.leaving = true;
+  };
+  /** The page came back from the back-forward cache, so it is not being left after all. */
+  private readonly onPageShow = (): void => {
+    this.leaving = false;
+  };
 
   constructor() {
     super();
+    globalThis.addEventListener?.('pagehide', this.onPageHide);
+    globalThis.addEventListener?.('pageshow', this.onPageShow);
     // Terminal events not acknowledged before the tab was reloaded go to the first listener, as after a relaunch.
     for (const event of this.storedEvents()) this.notifyListeners(EVENT, event, true);
   }
@@ -83,12 +114,14 @@ export class BackgroundUploadWeb extends WebPlugin implements BackgroundUploadPl
 
     const ticket = {};
     this.starting.set(id, ticket);
+    this.updateLeaveGuard();
     let file: Blob;
     try {
       file = options.file ?? (await this.fetchFile(filePath));
     } catch (e) {
       // A start that failed does not touch an upload already running with this id, as on iOS and Android.
       if (this.starting.get(id) === ticket) this.starting.delete(id);
+      this.updateLeaveGuard();
       throw e;
     }
     // Replaced by a later start, or removed, while the file was being fetched.
@@ -110,6 +143,7 @@ export class BackgroundUploadWeb extends WebPlugin implements BackgroundUploadPl
     this.cancel(id);
     const upload: Running = { xhr, startedAt: Date.now(), lastPercent: -1, lastProgressAt: 0 };
     this.running.set(id, upload);
+    this.updateLeaveGuard();
     const current = () => this.running.get(id) === upload;
 
     xhr.upload.onprogress = (e) => {
@@ -121,6 +155,7 @@ export class BackgroundUploadWeb extends WebPlugin implements BackgroundUploadPl
     xhr.onload = () => {
       if (!current()) return;
       this.running.delete(id);
+      this.updateLeaveGuard();
       const statusCode = xhr.status;
       if (statusCode === 0) return this.finish(this.networkError(id));
       const serverResponse = typeof xhr.responseText === 'string' ? xhr.responseText : '';
@@ -148,9 +183,33 @@ export class BackgroundUploadWeb extends WebPlugin implements BackgroundUploadPl
     xhr.onerror = xhr.ontimeout = () => {
       if (!current()) return;
       this.running.delete(id);
-      this.finish(this.networkError(id));
+      this.updateLeaveGuard();
+      // WebKit ends a request with an error when the page is left; Chromium and Firefox end it silently. Leaving is
+      // not a failure of the upload, so it gets no event, the same in every browser.
+      if (this.leaving) return;
+      const event = this.networkError(id);
+      if (Date.now() - this.askedToLeaveAt < LEAVE_GRACE_MS) {
+        // A timer does not outlive the page, so if it is being left this reports nothing.
+        setTimeout(() => {
+          if (!this.leaving) this.finish(event);
+        }, LEAVE_GRACE_MS);
+        return;
+      }
+      this.finish(event);
     };
     xhr.send(body);
+  }
+
+  /**
+   * The beforeunload listener is on only while something uploads: a page with one is kept out of the back-forward
+   * cache by some browsers, so an idle page should not carry it.
+   */
+  private updateLeaveGuard(): void {
+    if (this.running.size > 0 || this.starting.size > 0) {
+      globalThis.addEventListener?.('beforeunload', this.confirmLeave);
+    } else {
+      globalThis.removeEventListener?.('beforeunload', this.confirmLeave);
+    }
   }
 
   async removeUpload(options: { id: string }): Promise<void> {
@@ -158,6 +217,7 @@ export class BackgroundUploadWeb extends WebPlugin implements BackgroundUploadPl
     if (!id) throw reject('id is required', 'MISSING_OPTION');
     this.starting.delete(id);
     this.cancel(id);
+    this.updateLeaveGuard();
     this.storeEvents(this.storedEvents().filter((event) => event.id !== id));
   }
 

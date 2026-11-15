@@ -347,3 +347,91 @@ describe('terminal events on the web', () => {
     await expect(web.acknowledgeEvent({ eventId: '' })).rejects.toMatchObject({ code: 'MISSING_OPTION' });
   });
 });
+
+describe('leaving the page on the web', () => {
+  let page: EventTarget;
+  let plain: BackgroundUploadWeb;
+  let seen: UploadEvent[];
+
+  /** Dispatches beforeunload and answers whether the browser would ask the user first. */
+  const wouldAsk = () => {
+    const event = new Event('beforeunload', { cancelable: true });
+    page.dispatchEvent(event);
+    return event.defaultPrevented;
+  };
+
+  beforeEach(async () => {
+    page = new EventTarget();
+    vi.stubGlobal('addEventListener', page.addEventListener.bind(page));
+    vi.stubGlobal('removeEventListener', page.removeEventListener.bind(page));
+    plain = new BackgroundUploadWeb();
+    seen = [];
+    await plain.addListener('event', (e) => seen.push(e));
+  });
+
+  it('asks only while an upload is running', async () => {
+    expect(wouldAsk()).toBe(false);
+    await plain.startUpload(options());
+    expect(wouldAsk()).toBe(true);
+    last().respond(204, '');
+    expect(wouldAsk()).toBe(false);
+  });
+
+  it('asks while the file is still being fetched, and stops when that fails', async () => {
+    let fail: (e: unknown) => void = () => undefined;
+    fetchMock.mockReturnValueOnce(new Promise((_resolve, rejectFetch) => (fail = rejectFetch)));
+    const start = plain.startUpload(options({ file: undefined }));
+    expect(wouldAsk()).toBe(true);
+    fail(new TypeError('Failed to fetch'));
+    await expect(start).rejects.toMatchObject({ code: 'FILE_NOT_FOUND' });
+    expect(wouldAsk()).toBe(false);
+  });
+
+  it('stops asking after a failure and after removeUpload', async () => {
+    await plain.startUpload(options({ id: 'a' }));
+    await plain.startUpload(options({ id: 'b' }));
+    FakeXHR.all[0].fail();
+    expect(wouldAsk()).toBe(true);
+    await plain.removeUpload({ id: 'b' });
+    expect(wouldAsk()).toBe(false);
+  });
+
+  it('reports no FAILED for a request ended by leaving the page, as WebKit does', async () => {
+    await plain.startUpload(options());
+    page.dispatchEvent(new Event('pagehide'));
+    last().fail();
+    expect(seen).toEqual([]);
+    expect(storage.items.size).toBe(0);
+  });
+
+  it('holds an error that follows the prompt: dropped if the page goes, reported if the user stayed', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout'] });
+    await plain.startUpload(options({ id: 'a' }));
+    await plain.startUpload(options({ id: 'b' }));
+    expect(wouldAsk()).toBe(true);
+    // WebKit: "Leave" ends the requests before pagehide.
+    FakeXHR.all[0].fail();
+    expect(seen).toEqual([]);
+    page.dispatchEvent(new Event('pagehide'));
+    vi.advanceTimersByTime(10_000);
+    expect(seen).toEqual([]);
+    expect(storage.items.size).toBe(0);
+
+    // Back from the back-forward cache, asked again, and this time the user stays: an error that comes now is real,
+    // and arrives once the grace period is over.
+    page.dispatchEvent(new Event('pageshow'));
+    expect(wouldAsk()).toBe(true);
+    FakeXHR.all[1].fail();
+    expect(seen).toEqual([]);
+    vi.advanceTimersByTime(10_000);
+    expect(seen.map((e) => [e.id, e.state])).toEqual([['b', 'FAILED']]);
+  });
+
+  it('reports a failure again once the page is back from the back-forward cache', async () => {
+    page.dispatchEvent(new Event('pagehide'));
+    page.dispatchEvent(new Event('pageshow'));
+    await plain.startUpload(options());
+    last().fail();
+    expect(seen.map((e) => e.state)).toEqual(['FAILED']);
+  });
+});

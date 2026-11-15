@@ -121,6 +121,13 @@ background: the request is an ordinary `XMLHttpRequest`, it runs while the page 
 navigating away from the page ends it with no event. Start it again on the next load if it matters. No service worker
 and no Background Fetch are used.
 
+So that this does not happen by accident, while an upload is running (or its file is still being fetched) leaving the
+page first asks the user to confirm, with the browser's own "Leave site?" dialog; the page cannot change its text. If
+the user stays, the upload carries on. If they leave, the upload ends with no event in every browser, WebKit included,
+which ends the request with a network error as soon as "Leave" is chosen: a network error that follows the prompt is
+held for ten seconds and dropped if the page goes, or reported if the user stayed. The `beforeunload` listener is added only while something uploads,
+so an idle page keeps its place in the back-forward cache.
+
 ```typescript
 // A file the user picked: pass the Blob in `file`; `filePath` then only names the multipart part.
 const [picked] = (document.querySelector('input[type=file]') as HTMLInputElement).files!;
