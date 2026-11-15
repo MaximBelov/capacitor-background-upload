@@ -1,0 +1,18 @@
+# An S3 emulator for testing the web implementation against a presigned POST with real bucket CORS rules.
+# LocalStack enforces a bucket's CORS configuration on the preflight and on the request itself, as S3 does,
+# and with S3_SKIP_SIGNATURE_VALIDATION=0 it checks presigned POST policies and presigned GET signatures too.
+# 4.4 is pinned: it is a community image that starts without an account token.
+services:
+  s3:
+    image: localstack/localstack:4.4
+    container_name: capacitor-background-upload-s3
+    ports:
+      - '4566:4566'
+    environment:
+      SERVICES: s3
+      S3_SKIP_SIGNATURE_VALIDATION: '0'
+    healthcheck:
+      test: ['CMD', 'bash', '-c', 'curl -sf localhost:4566/_localstack/health | grep -q "\"s3\": \"available\""']
+      interval: 2s
+      timeout: 2s
+      retries: 30

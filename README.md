@@ -166,6 +166,44 @@ npm run test:android   # the Kotlin request and stores with JUnit, against a loc
 `example-app/` is a Capacitor app with the plugin installed from this folder and a test server to drive it from a
 computer; its README says how.
 
+### An S3 emulator for the web implementation
+
+`test/server/` runs the web upload against a presigned S3 POST with real bucket CORS rules, which a unit test cannot
+reach: the browser's preflight, the multipart order S3 accepts, and the refusal when the origin is not allowed. It
+needs Docker.
+
+```bash
+npm run test:server:up      # LocalStack S3 in Docker (port 4566), signatures and CORS enforced
+npm run test:server         # the test server on :4580, S3 through logging proxies on :4581 and :4582 (slow)
+npm run test:server:check   # checks the setup without a browser: preflights, presigned POST and GET, signatures
+npm run test:server:down
+```
+
+The server creates two buckets: `uploads-allowed`, whose CORS rules allow the origins in `ALLOWED_ORIGINS`
+(default `http://localhost:5173`), and `uploads-denied`, which allows none of them. A page gets an upload with
+`POST /presign` (`{ key, bucket?: 'denied', slow?: true }`, answering `{ url, fields }`) and passes it on as
+`{ serverUrl: url, parameters: fields, fileKey: 'file' }`; `POST /presign-get` answers a download URL for the same key,
+`GET /object?key=` the size and SHA-256 of what landed in the bucket, and `GET /s3-log` every request the browser sent
+to S3, preflights included. `slow: true` routes the upload through a proxy that sends the body at 200 kB/s
+(`SLOW_BPS`), so a test can reload or abort a page mid-upload. `POST /echo` is a multipart sink that records the parts
+in the order they arrived (`GET /echo-log`).
+
+The bucket rules a web app needs, as the server applies them:
+
+```json
+{
+  "AllowedOrigins": ["https://your-web-app.example"],
+  "AllowedMethods": ["POST", "GET", "HEAD"],
+  "AllowedHeaders": ["*"],
+  "ExposeHeaders": ["ETag"],
+  "MaxAgeSeconds": 3000
+}
+```
+
+`POST` is the upload, which is always preflighted because the plugin watches its progress; `GET` is a download with
+`fetch`, which is not. The plugin sends no custom headers and reads only the status and the body, so `AllowedHeaders`
+and `ExposeHeaders` are not strictly needed for it.
+
 ## API
 
 <docgen-index>
