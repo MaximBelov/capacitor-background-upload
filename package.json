@@ -1,7 +1,7 @@
 {
   "name": "capacitor-background-upload",
-  "version": "0.1.0",
-  "description": "Background file uploads for Capacitor: URLSession background sessions on iOS, WorkManager on Android",
+  "version": "0.2.0",
+  "description": "Background file uploads for Capacitor: URLSession background sessions on iOS, WorkManager on Android, XMLHttpRequest on the web",
   "main": "dist/plugin.cjs.js",
   "module": "dist/esm/index.js",
   "types": "dist/esm/index.d.ts",

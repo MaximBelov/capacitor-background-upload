@@ -1,15 +1,31 @@
 # capacitor-background-upload
 
 Multipart file uploads that keep going when the app is in the background, and after it has been killed, for Capacitor 8 on
-iOS and Android.
+iOS and Android, with the same API on the web for an app that also runs in a browser.
 
 - **iOS**: a background `URLSession`. The request body is written to a file and handed to the system, which sends it
   while the app is suspended or not running. No AFNetworking, no third-party code.
 - **Android**: a `WorkManager` job that waits for a network connection. The request is sent with `HttpURLConnection`;
   the only dependency is `androidx.work`.
+- **Web**: an `XMLHttpRequest` with a `FormData` body, while the page is open. There is no background on the web; see
+  [On the web](#on-the-web).
 
-Both platforms retry a request that got no response (up to 10 attempts, 30 s apart and doubling), keep every terminal
-event on the device until you acknowledge it, and send the file under its bare name.
+Both native platforms retry a request that got no response (up to 10 attempts, 30 s apart and doubling), keep every
+terminal event on the device until you acknowledge it, and send the file under its bare name.
+
+| Method / feature                                          | iOS | Android | Web                                  |
+| --------------------------------------------------------- | --- | ------- | ------------------------------------ |
+| `startUpload`                                             | ✅  | ✅      | ✅ while the page is open            |
+| `removeUpload`                                            | ✅  | ✅      | ✅ aborts the request                |
+| `acknowledgeEvent`                                        | ✅  | ✅      | ✅                                   |
+| `addListener('event')`                                    | ✅  | ✅      | ✅                                   |
+| Upload goes on in the background                          | ✅  | ✅      | ❌ ends with the page, with no event |
+| Upload goes on after the app is killed                    | ✅  | ✅      | ❌                                   |
+| Retry of a request that got no response                   | ✅  | ✅      | ❌ one attempt, then `FAILED` -2     |
+| Terminal events kept until acknowledged                   | ✅  | ✅      | ✅ in the tab's `sessionStorage`     |
+| `filePath` as a path, `file://` or `convertFileSrc()` URL | ✅  | ✅      | ❌ a URL the page can fetch          |
+| `file` (a `Blob` or `File`)                               | ❌  | ❌      | ✅                                   |
+| `notificationTitle`                                       | ❌  | ✅      | ❌                                   |
 
 ## Install
 
@@ -75,7 +91,7 @@ There is no init call. The uploader is created with the plugin, once per process
 calling `addListener` again just adds a listener. `removeAllListeners()` stops the events reaching JavaScript and leaves
 the uploads running.
 
-### Things that differ between the platforms
+### Things that differ between iOS and Android
 
 - **iOS, app swiped away by the user**: iOS cancels the session's tasks. The plugin notices at the next launch (about 5
   seconds after the plugin loads) and sends those uploads again from the start. An app ended by the system instead
@@ -97,6 +113,45 @@ the uploads running.
 - **The file part's `Content-Type`** comes from the platform's own table for the extension, so the two can differ for
   an unusual one (`.bin` is `application/macbinary` on iOS and `application/octet-stream` on Android). S3 takes the
   object's type from a `Content-Type` form field, not from this header.
+
+## On the web
+
+The same calls work in a browser, so an app has one upload code path. What the web cannot do is upload in the
+background: the request is an ordinary `XMLHttpRequest`, it runs while the page is open, and closing, reloading or
+navigating away from the page ends it with no event. Start it again on the next load if it matters. No service worker
+and no Background Fetch are used.
+
+```typescript
+// A file the user picked: pass the Blob in `file`; `filePath` then only names the multipart part.
+const [picked] = (document.querySelector('input[type=file]') as HTMLInputElement).files!;
+await BackgroundUpload.startUpload({
+  id: 'photo-1.jpg',
+  file: picked,
+  filePath: picked.name,
+  serverUrl: 'https://my-bucket.s3.eu-west-1.amazonaws.com/',
+  parameters: { key: 'uploads/photo-1.jpg', policy: '…', 'x-amz-signature': '…' },
+});
+
+// Or a URL the page can fetch (same origin, allowed by CORS, blob: or data:), fetched before startUpload resolves.
+await BackgroundUpload.startUpload({ id: 'report', filePath: '/files/report.pdf', serverUrl: 'https://example.com/up' });
+```
+
+- **The file** is `file` when it is given, and otherwise whatever `fetch(filePath)` returns; a fetch that fails or
+  answers outside 2xx makes `startUpload` reject with `FILE_NOT_FOUND`. A native path or `file://` URL means nothing
+  to a browser. The part is named after the bare name of `filePath` (`blob` for a `blob:` or `data:` URL), and its
+  `Content-Type` is the Blob's type, or `application/octet-stream` when it has none.
+- **The request** carries `parameters` first, sorted by name, then the file, as on iOS and Android, with `headers`
+  except `Content-Type` and `Content-Length`, which the browser writes. The server has to allow the page's origin by
+  CORS. The plugin watches upload progress, which makes the browser send a preflight `OPTIONS` request first, also to
+  a presigned S3 POST, so the bucket's CORS rules have to allow `POST` (or `PUT`) from the origin.
+- **Events** have the same names and fields as on iOS and Android. `UPLOADING` comes from `upload.onprogress`, at most
+  once a second and always once at 100. Any response ends the upload: 2xx as `UPLOADED`, anything else as `FAILED`
+  with `errorCode: 0`. There is one attempt: a network error, or a request refused by CORS (the browser does not say
+  which), is `FAILED` with `errorCode: -2` at once. `-3` is not used.
+- **`removeUpload`** aborts the request; as on iOS and Android it sends no event. Starting an id that is running
+  aborts the old request the same way. Any number of uploads can run at once, each under its own id.
+- **Terminal events** get an `eventId` and are kept in the tab's `sessionStorage` until acknowledged: a reload of the
+  tab delivers them again to the first listener, other tabs do not see them, and closing the tab forgets them.
 
 ## Development
 
@@ -148,7 +203,7 @@ platforms.
 
 The promise resolves once the upload is queued; what happens next arrives as `event`s. It rejects, and queues
 nothing, when `id`, `filePath` or `serverUrl` is missing, when `serverUrl` is not an http(s) URL, or when there is
-no file at `filePath`.
+no file at `filePath` (on the web: when `file` is not given and `filePath` cannot be fetched with a 2xx answer).
 
 | Param         | Type                                                    |
 | ------------- | ------------------------------------------------------- |
@@ -166,7 +221,7 @@ removeUpload(options: { id: string; }) => Promise<void>
 ```
 
 Cancels an upload and forgets it: no event is sent for it afterwards, and those of its events not yet acknowledged
-are dropped. Resolves also when there is no upload with that id.
+are dropped. Resolves also when there is no upload with that id. On the web the request is aborted.
 
 | Param         | Type                         |
 | ------------- | ---------------------------- |
@@ -184,7 +239,8 @@ acknowledgeEvent(options: { eventId: string; }) => Promise<void>
 ```
 
 Deletes a delivered `UPLOADED` or `FAILED` event from the device, so that it is not delivered again. Resolves also
-when there is no such event.
+when there is no such event. On the web the events are kept in the tab's `sessionStorage`, so a reload of the tab
+delivers them again and closing it forgets them.
 
 | Param         | Type                              |
 | ------------- | --------------------------------- |
@@ -239,16 +295,27 @@ Removes every listener. Uploads keep running, and their terminal events are kept
 
 #### UploadOptions
 
-| Prop                    | Type                                                            | Description                                                                                                                                                                                                          |
-| ----------------------- | --------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **`id`**                | <code>string</code>                                             | Your identifier for the upload. Every event about it carries it back as `id`, and `removeUpload` takes it. Starting an upload with the id of one that is still queued or running replaces it.                        |
-| **`filePath`**          | <code>string</code>                                             | The file to send: an absolute path, a `file://` URL, or a URL from `Capacitor.convertFileSrc()`. It is read when the request body is built and is not copied, so leave it in place until the terminal event arrives. |
-| **`serverUrl`**         | <code>string</code>                                             | The http(s) URL the multipart request is sent to.                                                                                                                                                                    |
-| **`fileKey`**           | <code>string</code>                                             | The name of the multipart field that carries the file. Defaults to `file`.                                                                                                                                           |
-| **`parameters`**        | <code><a href="#record">Record</a>&lt;string, string&gt;</code> | Extra form fields, sent before the file. A presigned S3 POST puts its policy and object key here; S3 requires them to come before the file, which is the order this plugin always uses.                              |
-| **`headers`**           | <code><a href="#record">Record</a>&lt;string, string&gt;</code> | Extra request headers. `Content-Type` and `Content-Length` are set by the plugin.                                                                                                                                    |
-| **`requestMethod`**     | <code>'POST' \| 'PUT'</code>                                    | `POST` (the default) or `PUT`. The body is multipart in both cases.                                                                                                                                                  |
-| **`notificationTitle`** | <code>string</code>                                             | Android only: the title of the notification shown while uploads run. Defaults to `Uploading files`.                                                                                                                  |
+| Prop                    | Type                                                          | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    | Since |
+| ----------------------- | ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----- |
+| **`id`**                | <code>string</code>                                           | Your identifier for the upload. Every event about it carries it back as `id`, and `removeUpload` takes it. Starting an upload with the id of one that is still queued or running replaces it.                                                                                                                                                                                                                                                                                                                                                                                                                                  |       |
+| **`filePath`**          | <code>string</code>                                           | The file to send: an absolute path, a `file://` URL, or a URL from `Capacitor.convertFileSrc()`. It is read when the request body is built and is not copied, so leave it in place until the terminal event arrives. Its bare name (`photo.jpg`) is the file name of the multipart part. On the web it is a URL the page can fetch (same origin or allowed by CORS, a `blob:` URL from `URL.createObjectURL()`, or a `data:` URL), unless `file` is given, in which case it only names the part. The file is fetched by `startUpload`, before it resolves. A `blob:` or `data:` URL has no name, so the part is called `blob`. |       |
+| **`file`**              | <code>Blob</code>                                             | Web only: the file itself, for example a `File` from an `&lt;input type="file"&gt;`. When it is given it is sent as is, and `filePath` is used only for the name of the part. iOS and Android ignore it: a `Blob` cannot cross the native bridge.                                                                                                                                                                                                                                                                                                                                                                              | 0.2.0 |
+| **`serverUrl`**         | <code>string</code>                                           | The http(s) URL the multipart request is sent to.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |       |
+| **`fileKey`**           | <code>string</code>                                           | The name of the multipart field that carries the file. Defaults to `file`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |       |
+| **`parameters`**        | <code><a href="#uploadparameters">UploadParameters</a></code> | Extra form fields, sent before the file. A presigned S3 POST puts its policy and object key here; S3 requires them to come before the file, which is the order this plugin always uses.                                                                                                                                                                                                                                                                                                                                                                                                                                        |       |
+| **`headers`**           | <code><a href="#uploadheaders">UploadHeaders</a></code>       | Extra request headers. `Content-Type` and `Content-Length` are set by the plugin. On the web the browser refuses some headers (`Cookie`, `Host`, `Origin`, ...) and a header other than the CORS-safelisted ones needs the server's permission in its preflight answer.                                                                                                                                                                                                                                                                                                                                                        |       |
+| **`requestMethod`**     | <code>'POST' \| 'PUT'</code>                                  | `POST` (the default) or `PUT`. The body is multipart in both cases.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |       |
+| **`notificationTitle`** | <code>string</code>                                           | Android only: the title of the notification shown while uploads run. Defaults to `Uploading files`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |       |
+
+
+#### UploadParameters
+
+Form fields, by name. Every value is sent as text.
+
+
+#### UploadHeaders
+
+Request headers, by name.
 
 
 #### PluginListenerHandle
@@ -260,28 +327,21 @@ Removes every listener. Uploads keep running, and their terminal events are kept
 
 #### UploadEvent
 
-| Prop                   | Type                                                | Description                                                                                                                                                                                |
-| ---------------------- | --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **`id`**               | <code>string</code>                                 | The `id` the upload was started with.                                                                                                                                                      |
-| **`state`**            | <code><a href="#uploadstate">UploadState</a></code> | What happened.                                                                                                                                                                             |
-| **`progress`**         | <code>number</code>                                 | `UPLOADING` only: the share of the body sent so far, 0 to 100.                                                                                                                             |
-| **`eventId`**          | <code>string</code>                                 | `UPLOADED` and `FAILED` only: the key to pass to `acknowledgeEvent`. Until it is acknowledged the event is kept on the device and delivered again after every launch.                      |
-| **`statusCode`**       | <code>number</code>                                 | The HTTP status of the response, when there was one.                                                                                                                                       |
-| **`serverResponse`**   | <code>string</code>                                 | The response body as text, when there was a response.                                                                                                                                      |
-| **`error`**            | <code>string</code>                                 | `FAILED` only: what went wrong, in words.                                                                                                                                                  |
-| **`errorCode`**        | <code>number</code>                                 | `FAILED` only: `0` when the server answered with a status outside 2xx (see `statusCode`), `-2` when the request failed on every one of its attempts, `-3` when the file could not be read. |
-| **`uploadDuration`**   | <code>number</code>                                 | `UPLOADED` only: milliseconds from the start of the last attempt to its response.                                                                                                          |
-| **`finishUploadTime`** | <code>number</code>                                 | `UPLOADED` only: when the response arrived, in milliseconds since the epoch.                                                                                                               |
+| Prop                   | Type                                                | Description                                                                                                                                                                                                                                                                                                                                                       |
+| ---------------------- | --------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **`id`**               | <code>string</code>                                 | The `id` the upload was started with.                                                                                                                                                                                                                                                                                                                             |
+| **`state`**            | <code><a href="#uploadstate">UploadState</a></code> | What happened.                                                                                                                                                                                                                                                                                                                                                    |
+| **`progress`**         | <code>number</code>                                 | `UPLOADING` only: the share of the body sent so far, 0 to 100.                                                                                                                                                                                                                                                                                                    |
+| **`eventId`**          | <code>string</code>                                 | `UPLOADED` and `FAILED` only: the key to pass to `acknowledgeEvent`. Until it is acknowledged the event is kept on the device and delivered again after every launch.                                                                                                                                                                                             |
+| **`statusCode`**       | <code>number</code>                                 | The HTTP status of the response, when there was one.                                                                                                                                                                                                                                                                                                              |
+| **`serverResponse`**   | <code>string</code>                                 | The response body as text, when there was a response.                                                                                                                                                                                                                                                                                                             |
+| **`error`**            | <code>string</code>                                 | `FAILED` only: what went wrong, in words.                                                                                                                                                                                                                                                                                                                         |
+| **`errorCode`**        | <code>number</code>                                 | `FAILED` only: `0` when the server answered with a status outside 2xx (see `statusCode`), `-2` when the request failed on every one of its attempts, `-3` when the file could not be read. On the web there is one attempt, so a network error or a CORS refusal is `-2` at once, and `-3` is not used: a file that cannot be fetched makes `startUpload` reject. |
+| **`uploadDuration`**   | <code>number</code>                                 | `UPLOADED` only: milliseconds from the start of the last attempt to its response.                                                                                                                                                                                                                                                                                 |
+| **`finishUploadTime`** | <code>number</code>                                 | `UPLOADED` only: when the response arrived, in milliseconds since the epoch.                                                                                                                                                                                                                                                                                      |
 
 
 ### Type Aliases
-
-
-#### Record
-
-Construct a type with a set of properties K of type T
-
-<code>{ [P in K]: T; }</code>
 
 
 #### UploadState

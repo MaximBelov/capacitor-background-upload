@@ -6,6 +6,16 @@ import type { PluginListenerHandle } from '@capacitor/core';
  */
 export type UploadState = 'UPLOADING' | 'UPLOADED' | 'FAILED';
 
+/** Form fields, by name. Every value is sent as text. */
+export interface UploadParameters {
+  [name: string]: string;
+}
+
+/** Request headers, by name. */
+export interface UploadHeaders {
+  [name: string]: string;
+}
+
 export interface UploadOptions {
   /**
    * Your identifier for the upload. Every event about it carries it back as `id`, and `removeUpload` takes it.
@@ -14,9 +24,23 @@ export interface UploadOptions {
   id: string;
   /**
    * The file to send: an absolute path, a `file://` URL, or a URL from `Capacitor.convertFileSrc()`. It is read when
-   * the request body is built and is not copied, so leave it in place until the terminal event arrives.
+   * the request body is built and is not copied, so leave it in place until the terminal event arrives. Its bare name
+   * (`photo.jpg`) is the file name of the multipart part.
+   *
+   * On the web it is a URL the page can fetch (same origin or allowed by CORS, a `blob:` URL from
+   * `URL.createObjectURL()`, or a `data:` URL), unless `file` is given, in which case it only names the part. The
+   * file is fetched by `startUpload`, before it resolves. A `blob:` or `data:` URL has no name, so the part is called
+   * `blob`.
    */
   filePath: string;
+  /**
+   * Web only: the file itself, for example a `File` from an `<input type="file">`. When it is given it is sent as is,
+   * and `filePath` is used only for the name of the part. iOS and Android ignore it: a `Blob` cannot cross the native
+   * bridge.
+   *
+   * @since 0.2.0
+   */
+  file?: Blob;
   /** The http(s) URL the multipart request is sent to. */
   serverUrl: string;
   /** The name of the multipart field that carries the file. Defaults to `file`. */
@@ -25,9 +49,13 @@ export interface UploadOptions {
    * Extra form fields, sent before the file. A presigned S3 POST puts its policy and object key here; S3 requires them
    * to come before the file, which is the order this plugin always uses.
    */
-  parameters?: Record<string, string>;
-  /** Extra request headers. `Content-Type` and `Content-Length` are set by the plugin. */
-  headers?: Record<string, string>;
+  parameters?: UploadParameters;
+  /**
+   * Extra request headers. `Content-Type` and `Content-Length` are set by the plugin. On the web the browser refuses
+   * some headers (`Cookie`, `Host`, `Origin`, ...) and a header other than the CORS-safelisted ones needs the server's
+   * permission in its preflight answer.
+   */
+  headers?: UploadHeaders;
   /** `POST` (the default) or `PUT`. The body is multipart in both cases. */
   requestMethod?: 'POST' | 'PUT';
   /** Android only: the title of the notification shown while uploads run. Defaults to `Uploading files`. */
@@ -54,7 +82,9 @@ export interface UploadEvent {
   error?: string;
   /**
    * `FAILED` only: `0` when the server answered with a status outside 2xx (see `statusCode`), `-2` when the request
-   * failed on every one of its attempts, `-3` when the file could not be read.
+   * failed on every one of its attempts, `-3` when the file could not be read. On the web there is one attempt, so a
+   * network error or a CORS refusal is `-2` at once, and `-3` is not used: a file that cannot be fetched makes
+   * `startUpload` reject.
    */
   errorCode?: number;
   /** `UPLOADED` only: milliseconds from the start of the last attempt to its response. */
@@ -79,7 +109,7 @@ export interface BackgroundUploadPlugin {
    *
    * The promise resolves once the upload is queued; what happens next arrives as `event`s. It rejects, and queues
    * nothing, when `id`, `filePath` or `serverUrl` is missing, when `serverUrl` is not an http(s) URL, or when there is
-   * no file at `filePath`.
+   * no file at `filePath` (on the web: when `file` is not given and `filePath` cannot be fetched with a 2xx answer).
    *
    * @since 0.1.0
    */
@@ -87,7 +117,7 @@ export interface BackgroundUploadPlugin {
 
   /**
    * Cancels an upload and forgets it: no event is sent for it afterwards, and those of its events not yet acknowledged
-   * are dropped. Resolves also when there is no upload with that id.
+   * are dropped. Resolves also when there is no upload with that id. On the web the request is aborted.
    *
    * @since 0.1.0
    */
@@ -95,7 +125,8 @@ export interface BackgroundUploadPlugin {
 
   /**
    * Deletes a delivered `UPLOADED` or `FAILED` event from the device, so that it is not delivered again. Resolves also
-   * when there is no such event.
+   * when there is no such event. On the web the events are kept in the tab's `sessionStorage`, so a reload of the tab
+   * delivers them again and closing it forgets them.
    *
    * @since 0.1.0
    */
