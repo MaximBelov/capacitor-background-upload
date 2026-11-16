@@ -6,7 +6,11 @@ describe('the web implementation', () => {
     const method = vi.spyOn(web.BackgroundUploadWeb.prototype, 'acknowledgeEvent');
     const { BackgroundUpload } = await import('../../src');
 
-    await Promise.all([BackgroundUpload.acknowledgeEvent({ eventId: 'none' }), BackgroundUpload.acknowledgeEvent({ eventId: 'none' }), BackgroundUpload.acknowledgeEvent({ eventId: 'none' })]);
+    await Promise.all([
+      BackgroundUpload.acknowledgeEvent({ eventId: 'none' }),
+      BackgroundUpload.acknowledgeEvent({ eventId: 'none' }),
+      BackgroundUpload.acknowledgeEvent({ eventId: 'none' }),
+    ]);
 
     expect(method).toHaveBeenCalledTimes(3);
     expect(new Set(method.mock.contexts).size).toBe(1);
